@@ -1,3 +1,5 @@
+> 本仓库为第三方改良版，**非原创**，系在原项目基础之上进行的二次开发与增强。
+
 <p align="center">
   <img src="build/icon.png" width="120" alt="魔因漫创 Logo" />
 </p>
