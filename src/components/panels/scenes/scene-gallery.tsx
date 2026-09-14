@@ -57,6 +57,8 @@ import {
   Search,
   Loader2,
   Eye,
+  CheckSquare,
+  Square,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -104,6 +106,9 @@ export function SceneGallery({ onSceneSelect, selectedSceneId }: SceneGalleryPro
   const [renamingFolder, setRenamingFolder] = useState<SceneFolder | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
+  const [isBulkMode, setIsBulkMode] = useState(false);
+  const [selectedSceneIds, setSelectedSceneIds] = useState<string[]>([]);
+  const [showBulkMoveDialog, setShowBulkMoveDialog] = useState(false);
 
   const visibleFolders = useMemo(() => {
     if (resourceSharing.shareScenes) return folders;
@@ -221,6 +226,9 @@ export function SceneGallery({ onSceneSelect, selectedSceneId }: SceneGalleryPro
     return buildSceneTree(rootScenes);
   }, [rootScenes, childScenesMap, expandedScenes]);
 
+  const selectedSceneSet = useMemo(() => new Set(selectedSceneIds), [selectedSceneIds]);
+  const bulkSelectedCount = selectedSceneIds.length;
+
   // Breadcrumb path
   const breadcrumbPath = useMemo(() => {
     const path: SceneFolder[] = [];
@@ -283,6 +291,13 @@ export function SceneGallery({ onSceneSelect, selectedSceneId }: SceneGalleryPro
   };
 
   const handleSceneClick = (scene: Scene) => {
+    if (isBulkMode) {
+      setSelectedSceneIds((prev) =>
+        prev.includes(scene.id) ? prev.filter((id) => id !== scene.id) : [...prev, scene.id]
+      );
+      return;
+    }
+
     if (selectedSceneId === scene.id) {
       selectScene(null);
       onSceneSelect(null);
@@ -290,6 +305,58 @@ export function SceneGallery({ onSceneSelect, selectedSceneId }: SceneGalleryPro
       selectScene(scene.id);
       onSceneSelect(scene);
     }
+  };
+
+  const handleToggleBulkMode = () => {
+    setIsBulkMode((prev) => {
+      const next = !prev;
+      if (next) {
+        selectScene(null);
+        onSceneSelect(null);
+      } else {
+        setSelectedSceneIds([]);
+      }
+      return next;
+    });
+  };
+
+  const handleSelectAllCurrent = () => {
+    setSelectedSceneIds(currentScenes.map(({ scene }) => scene.id));
+  };
+
+  const handleClearBulkSelection = () => {
+    setSelectedSceneIds([]);
+  };
+
+  const handleBulkDelete = () => {
+    if (selectedSceneIds.length === 0) {
+      toast.error("请先选择场景");
+      return;
+    }
+    if (!confirm(`确定删除已选中的 ${selectedSceneIds.length} 个场景吗？`)) return;
+
+    const selectedIdSet = new Set(selectedSceneIds);
+    selectedSceneIds.forEach((id) => deleteScene(id));
+    if (selectedSceneId && selectedIdSet.has(selectedSceneId)) {
+      selectScene(null);
+      onSceneSelect(null);
+    }
+    setSelectedSceneIds([]);
+    setIsBulkMode(false);
+    toast.success(`已删除 ${selectedIdSet.size} 个场景`);
+  };
+
+  const handleBulkMove = (folderId: string | null) => {
+    if (selectedSceneIds.length === 0) {
+      toast.error("请先选择场景");
+      return;
+    }
+
+    selectedSceneIds.forEach((id) => moveToFolder(id, folderId));
+    setShowBulkMoveDialog(false);
+    setSelectedSceneIds([]);
+    setIsBulkMode(false);
+    toast.success(`已移动 ${selectedSceneIds.length} 个场景`);
   };
 
   return (
@@ -381,7 +448,46 @@ export function SceneGallery({ onSceneSelect, selectedSceneId }: SceneGalleryPro
               <List className="h-3.5 w-3.5" />
             </Button>
           </div>
+          <Button
+            variant={isBulkMode ? "default" : "outline"}
+            size="sm"
+            className="h-8"
+            onClick={handleToggleBulkMode}
+          >
+            {isBulkMode ? <CheckSquare className="h-3.5 w-3.5 mr-1" /> : <Square className="h-3.5 w-3.5 mr-1" />}
+            批量
+          </Button>
         </div>
+
+        {isBulkMode && (
+          <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 p-2">
+            <span className="text-xs text-muted-foreground">已选 {bulkSelectedCount} 项</span>
+            <Button variant="secondary" size="sm" className="h-7" onClick={handleSelectAllCurrent}>
+              全选当前
+            </Button>
+            <Button variant="ghost" size="sm" className="h-7" onClick={handleClearBulkSelection}>
+              清空
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7"
+              disabled={bulkSelectedCount === 0}
+              onClick={() => setShowBulkMoveDialog(true)}
+            >
+              移动到
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              className="h-7"
+              disabled={bulkSelectedCount === 0}
+              onClick={handleBulkDelete}
+            >
+              删除
+            </Button>
+          </div>
+        )}
       </div>
 
       {/* Content */}
@@ -460,6 +566,8 @@ export function SceneGallery({ onSceneSelect, selectedSceneId }: SceneGalleryPro
                     <SceneCard
                       scene={scene}
                       isSelected={selectedSceneId === scene.id}
+                      isBulkMode={isBulkMode}
+                      isBulkSelected={selectedSceneSet.has(scene.id)}
                       viewMode={viewMode}
                       onClick={() => handleSceneClick(scene)}
                       depth={depth}
@@ -544,6 +652,29 @@ export function SceneGallery({ onSceneSelect, selectedSceneId }: SceneGalleryPro
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <Dialog open={showBulkMoveDialog} onOpenChange={setShowBulkMoveDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>批量移动场景</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Button variant="outline" className="w-full justify-start" onClick={() => handleBulkMove(null)}>
+              移动到当前根目录
+            </Button>
+            {visibleFolders.map((folder) => (
+              <Button
+                key={folder.id}
+                variant="outline"
+                className="w-full justify-start"
+                onClick={() => handleBulkMove(folder.id)}
+              >
+                {folder.name}
+              </Button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -552,6 +683,8 @@ export function SceneGallery({ onSceneSelect, selectedSceneId }: SceneGalleryPro
 function SceneCard({
   scene,
   isSelected,
+  isBulkMode,
+  isBulkSelected,
   viewMode,
   onClick,
   depth = 0,
@@ -564,6 +697,8 @@ function SceneCard({
 }: {
   scene: Scene;
   isSelected: boolean;
+  isBulkMode?: boolean;
+  isBulkSelected?: boolean;
   viewMode: ViewMode;
   onClick: () => void;
   depth?: number;         // 嵌套层级
@@ -589,8 +724,9 @@ function SceneCard({
       <div
         style={indentStyle}
         className={cn(
-          "rounded-md border cursor-pointer transition-all p-2",
+          "relative rounded-md border cursor-pointer transition-all p-2",
           "hover:border-foreground/30",
+          isBulkMode && isBulkSelected && "border-primary ring-1 ring-primary bg-primary/5",
           isSelected && "border-primary ring-1 ring-primary",
           depth > 0 && "border-dashed border-muted-foreground/50"
         )}
@@ -602,6 +738,15 @@ function SceneCard({
           }
         }}
       >
+        {isBulkMode && (
+          <div className="absolute left-2 top-2 z-10 rounded-sm bg-background/90">
+            {isBulkSelected ? (
+              <CheckSquare className="h-4 w-4 text-primary" />
+            ) : (
+              <Square className="h-4 w-4 text-muted-foreground" />
+            )}
+          </div>
+        )}
         <div
           className={cn(
             "aspect-video rounded bg-muted flex items-center justify-center overflow-hidden mb-2 relative",
@@ -719,8 +864,9 @@ function SceneCard({
     <div
       style={indentStyle}
       className={cn(
-        "rounded-md border cursor-pointer transition-all p-2 flex items-center gap-2",
+        "relative rounded-md border cursor-pointer transition-all p-2 flex items-center gap-2",
         "hover:border-foreground/30",
+        isBulkMode && isBulkSelected && "border-primary ring-1 ring-primary bg-primary/5",
         isSelected && "border-primary ring-1 ring-primary",
         depth > 0 && "border-dashed border-muted-foreground/50"
       )}

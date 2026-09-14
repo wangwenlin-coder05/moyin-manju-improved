@@ -8,9 +8,25 @@
  */
 
 import { getFeatureConfig, getFeatureNotConfiguredMessage } from '@/lib/ai/feature-router';
-import { retryOperation } from '@/lib/utils/retry';
 import { resolveImageApiFormat } from '@/lib/api-key-manager';
+import { retryOperation } from '@/lib/utils/retry';
 import { useAPIConfigStore } from '@/stores/api-config-store';
+
+/**
+ * 按功能决定图片 API 格式（不靠模型名猜）
+ * 图片生成功能默认走标准 /v1/images/generations
+ * 只有 Gemini（走 chat completions）和 Kling（走原生 API）是例外
+ */
+function getImageApiFormat(
+  model: string,
+  endpointTypes?: string[],
+): 'openai_images' | 'openai_chat' | 'kling_image' {
+  const resolved = resolveImageApiFormat(endpointTypes, model);
+  if (resolved === 'openai_chat' || resolved === 'openai_images' || resolved === 'kling_image') {
+    return resolved;
+  }
+  return 'openai_images';
+}
 
 export interface ImageGenerationParams {
   prompt: string;
@@ -128,15 +144,6 @@ function normalizeResolutionForGemini(resolution?: string): string {
 }
 
 /**
- * 判断模型是否需要像素尺寸格式 (如 "1024x1024") 而非比例格式 (如 "1:1")
- * doubao-seedream, cogview 等国产模型需要像素尺寸
- */
-function needsPixelSize(model: string): boolean {
-  const m = model.toLowerCase();
-  return m.includes('doubao') || m.includes('seedream') || m.includes('cogview') || false /* zhipu removed */;
-}
-
-/**
  * Generate image for character
  */
 export async function generateCharacterImage(params: ImageGenerationParams): Promise<ImageGenerationResult> {
@@ -172,14 +179,14 @@ async function generateImage(
   const aspectRatio = params.aspectRatio || '1:1';
   const resolution = params.resolution || '2K';
 
-  // 根据元数据决定图片生成 API 格式
+  // 按功能决定 API 格式：图片生成功能默认走标准图片 API
+  // 只有 Gemini（走 chat completions）和 Kling（走原生 API）是例外
   const endpointTypes = useAPIConfigStore.getState().modelEndpointTypes[model];
-  const apiFormat = resolveImageApiFormat(endpointTypes, model);
+  const apiFormat = getImageApiFormat(model, endpointTypes);
 
   console.log('[ImageGenerator] Generating image', {
     model,
     apiFormat,
-    endpointTypes,
     aspectRatio,
     resolution,
     promptPreview: params.prompt.substring(0, 100) + '...',
@@ -538,20 +545,19 @@ async function submitImageTask(
   if (!baseUrl) {
     throw new Error('请先在设置中配置图片生成服务映射');
   }
-  // 根据模型决定 size 格式
-  let sizeValue: string = aspectRatio;
-  if (model && needsPixelSize(model)) {
-    const dims = ASPECT_RATIO_DIMS[aspectRatio];
-    if (dims) {
-      sizeValue = `${dims.width}x${dims.height}`;
-    }
-  }
+
+  // 同时发送 size（标准 OpenAI/Agnes）、aspect_ratio + resolution（memefast），兼容所有供应商
+  const dims = ASPECT_RATIO_DIMS[aspectRatio] || ASPECT_RATIO_DIMS['1:1'];
+  const multiplier = RESOLUTION_MULTIPLIERS[resolution || '2K'] || 2;
+  const sizeValue = `${dims.width * multiplier}x${dims.height * multiplier}`;
 
   const requestData: Record<string, unknown> = {
     model: model,
     prompt,
     n: 1,
     size: sizeValue,
+    aspect_ratio: aspectRatio,
+    resolution: resolution || '2K',
     stream: false,
   };
 
@@ -563,6 +569,7 @@ async function submitImageTask(
   console.log('[ImageGenerator] Submitting image task:', {
     model: requestData.model,
     size: requestData.size,
+    aspect_ratio: requestData.aspect_ratio,
     resolution: requestData.resolution,
     hasImageUrls: !!requestData.image_urls,
   });
@@ -794,7 +801,7 @@ export async function submitGridImageRequest(params: {
 
   // 检测 API 格式（与 generateImage 一致）
   const endpointTypes = useAPIConfigStore.getState().modelEndpointTypes[model];
-  const apiFormat = resolveImageApiFormat(endpointTypes, model);
+  const apiFormat = getImageApiFormat(model, endpointTypes);
   console.log('[GridImageAPI] format:', apiFormat, 'model:', model);
 
   if (apiFormat === 'openai_chat') {
@@ -812,15 +819,20 @@ export async function submitGridImageRequest(params: {
   const imagePaths = getImageEndpointPaths(endpointTypes || []);
   const rootBase = getRootBaseUrl(normalizedBase);
   const endpoint = `${rootBase}${imagePaths.submit}`;
+
+  // 同时发送 size（标准 OpenAI/Agnes）、aspect_ratio + resolution（memefast），兼容所有供应商
+  const dims = ASPECT_RATIO_DIMS[aspectRatio] || ASPECT_RATIO_DIMS['1:1'];
+  const multiplier = RESOLUTION_MULTIPLIERS[resolution || '2K'] || 2;
+  const sizeValue = `${dims.width * multiplier}x${dims.height * multiplier}`;
+
   const requestBody: Record<string, unknown> = {
     model,
     prompt,
     n: 1,
+    size: sizeValue,
     aspect_ratio: aspectRatio,
+    resolution: resolution || '2K',
   };
-  if (resolution) {
-    requestBody.resolution = resolution;
-  }
   if (referenceImages && referenceImages.length > 0) {
     requestBody.image_urls = referenceImages;
   }

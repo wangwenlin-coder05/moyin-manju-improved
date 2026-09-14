@@ -78,10 +78,11 @@ type SheetElementId = typeof SHEET_ELEMENTS[number]['id'];
 
 interface GenerationPanelProps {
   selectedCharacter: Character | null;
+  visibleCharacters: Character[];
   onCharacterCreated?: (id: string) => void;
 }
 
-export function GenerationPanel({ selectedCharacter, onCharacterCreated }: GenerationPanelProps) {
+export function GenerationPanel({ selectedCharacter, visibleCharacters, onCharacterCreated }: GenerationPanelProps) {
   const { 
     addCharacter, 
     updateCharacter,
@@ -92,6 +93,7 @@ export function GenerationPanel({ selectedCharacter, onCharacterCreated }: Gener
     setGenerationStatus,
     setGeneratingCharacter,
     currentFolderId,
+    getCharacterById,
   } = useCharacterLibraryStore();
   const { activeProjectId } = useProjectStore();
   const scriptProject = useActiveScriptProject();
@@ -136,12 +138,17 @@ export function GenerationPanel({ selectedCharacter, onCharacterCreated }: Gener
   // Preview state
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewCharacterId, setPreviewCharacterId] = useState<string | null>(null);
+  const [previewAppliedAsPrimary, setPreviewAppliedAsPrimary] = useState(false);
   
   // AI 校准信息折叠区状态：有数据时默认展开
   const [calibrationExpanded, setCalibrationExpanded] = useState(true);
   const [isManuallyModified, setIsManuallyModified] = useState(false);
 
   const isGenerating = generationStatus === 'generating';
+  const batchSupportingCount = visibleCharacters.filter((character) => {
+    const tags = character.tags || [];
+    return !!character.description?.trim() && (tags.includes('supporting') || tags.includes('minor') || tags.includes('extra'));
+  }).length;
   
   // 检查是否有 AI 校准数据
   const hasCalibrationData = !!(identityAnchors || charNegativePrompt || visualPromptEn || visualPromptZh);
@@ -326,8 +333,333 @@ export function GenerationPanel({ selectedCharacter, onCharacterCreated }: Gener
     setIsManuallyModified(false);
   };
 
+  const buildNegativePrompt = (
+    realistic: boolean,
+    negativePrompt?: CharacterNegativePrompt,
+  ) => {
+    let result = realistic
+      ? 'blurry, low quality, watermark, text, cropped, anime, cartoon, illustration'
+      : 'blurry, low quality, watermark, text, cropped';
+
+    if (negativePrompt) {
+      const avoidList = negativePrompt.avoid || [];
+      const styleExclusions = negativePrompt.styleExclusions || [];
+      const extras = [...avoidList, ...styleExclusions].join(', ');
+      if (extras) {
+        result = `${result}, ${extras}`;
+      }
+    }
+
+    return result;
+  };
+
+  const persistGeneratedSheet = async (
+    characterId: string,
+    characterName: string,
+    imageUrl: string,
+    makePrimary: boolean,
+    visualTraits: string,
+  ): Promise<{ localPath: string; appliedAsPrimary: boolean }> => {
+    const localPath = await saveImageToLocal(
+      imageUrl,
+      'characters',
+      `${characterName.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_')}_${Date.now()}.png`
+    );
+
+    const currentCharacter = getCharacterById(characterId);
+    const currentCandidates = currentCharacter?.sheetCandidates || [];
+    const nextCandidates = currentCandidates.some((candidate) => candidate.imageUrl === localPath)
+      ? currentCandidates
+      : [
+          ...currentCandidates,
+          {
+            id: `sheet_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+            imageUrl: localPath,
+            createdAt: Date.now(),
+          },
+        ];
+
+    const updates: Partial<Character> = {
+      sheetCandidates: nextCandidates,
+      visualTraits: currentCharacter?.visualTraits || visualTraits,
+    };
+
+    if (makePrimary) {
+      addCharacterView(characterId, {
+        viewType: 'front',
+        imageUrl: localPath,
+      });
+      updates.thumbnailUrl = localPath;
+    }
+
+    updateCharacter(characterId, updates);
+
+    if (makePrimary) {
+      const aiFolderId = getOrCreateCategoryFolder('ai-image');
+      addMediaFromUrl({
+        url: localPath,
+        name: `角色-${characterName || '未命名'}`,
+        type: 'image',
+        source: 'ai-image',
+        folderId: aiFolderId,
+        projectId: activeProjectId || undefined,
+      });
+    }
+
+    return { localPath, appliedAsPrimary: makePrimary };
+  };
+
+  const generateForCharacter = async (
+    target: Character,
+    overrides?: {
+      description?: string;
+      styleId?: string;
+      referenceImages?: string[];
+      selectedElements?: SheetElementId[];
+      promptLanguage?: PromptLanguage;
+      identityAnchors?: CharacterIdentityAnchors;
+      negativePrompt?: CharacterNegativePrompt;
+      visualPromptEn?: string;
+      visualPromptZh?: string;
+      storyYear?: number;
+      era?: string;
+    },
+  ) => {
+    const charDescription = overrides?.description ?? target.description;
+    const charStyleId = overrides?.styleId ?? target.styleId ?? styleId;
+    const charReferenceImages = overrides?.referenceImages ?? target.referenceImages ?? [];
+    const charElements = overrides?.selectedElements ?? selectedElements;
+    const charPromptLanguage = overrides?.promptLanguage ?? promptLanguage ?? scriptProject?.promptLanguage ?? 'zh';
+    const charIdentityAnchors = overrides?.identityAnchors ?? target.identityAnchors;
+    const charNegative = overrides?.negativePrompt ?? target.negativePrompt;
+    const charVisualPromptEn = overrides?.visualPromptEn;
+    const charVisualPromptZh = overrides?.visualPromptZh;
+    const charStoryYear = overrides?.storyYear ?? storyYear;
+    const charEra = overrides?.era ?? era;
+
+    const prompt = buildCharacterSheetPrompt(
+      charDescription,
+      target.name,
+      charElements,
+      charStyleId,
+      charVisualPromptEn,
+      charVisualPromptZh,
+      charPromptLanguage,
+      charIdentityAnchors,
+      charReferenceImages.length > 0,
+      charStoryYear,
+      charEra,
+    );
+
+    const stylePreset = charStyleId && charStyleId !== 'random' ? getStyleById(charStyleId) : null;
+    const isRealistic = stylePreset?.category === 'real';
+    const negativePrompt = buildNegativePrompt(isRealistic, charNegative);
+
+    const result = await generateCharacterImageAPI({
+      prompt,
+      negativePrompt,
+      aspectRatio: '1:1',
+      referenceImages: charReferenceImages,
+      styleId: charStyleId,
+    });
+
+    const existingCharacter = getCharacterById(target.id);
+    const hasPrimarySheet = !!existingCharacter?.thumbnailUrl || existingCharacter?.views.some((view) => view.viewType === 'front');
+    const persisted = await persistGeneratedSheet(
+      target.id,
+      target.name,
+      result.imageUrl,
+      !hasPrimarySheet,
+      `${target.name} character, ${charDescription.substring(0, 200)}`,
+    );
+
+    setPreviewUrl(persisted.localPath);
+    setPreviewCharacterId(target.id);
+    setPreviewAppliedAsPrimary(persisted.appliedAsPrimary);
+
+    return persisted;
+  };
+
+  const applyPreviewAsPrimary = () => {
+    if (!previewCharacterId || !previewUrl) return;
+    addCharacterView(previewCharacterId, {
+      viewType: 'front',
+      imageUrl: previewUrl,
+    });
+    updateCharacter(previewCharacterId, { thumbnailUrl: previewUrl });
+    setPreviewAppliedAsPrimary(true);
+    toast.success("已将当前候选图设为角色设定图");
+  };
+
+  const handleCreateAndGenerateV2 = async () => {
+    if (selectedElements.length === 0) {
+      toast.error("请至少选择一个生成内容");
+      return;
+    }
+
+    let targetCharacter: Character | null = previewCharacterId
+      ? (getCharacterById(previewCharacterId) || null)
+      : null;
+
+    if (!targetCharacter) {
+      if (!name.trim()) {
+        toast.error("请输入角色名称");
+        return;
+      }
+      if (!description.trim()) {
+        toast.error("请输入角色描述");
+        return;
+      }
+
+      const targetId = addCharacter({
+        name: name.trim(),
+        description: description.trim(),
+        visualTraits: "",
+        gender: gender || undefined,
+        age: age || undefined,
+        personality: personality.trim() || undefined,
+        role: role.trim() || undefined,
+        traits: traits.trim() || undefined,
+        skills: skills.trim() || undefined,
+        keyActions: keyActions.trim() || undefined,
+        appearance: appearance.trim() || undefined,
+        relationships: relationships.trim() || undefined,
+        tags: tags.length > 0 ? tags : undefined,
+        notes: notes.trim() || undefined,
+        referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
+        styleId: styleId === "random" ? undefined : styleId,
+        views: [],
+        folderId: currentFolderId,
+        projectId: activeProjectId || undefined,
+        identityAnchors,
+        negativePrompt: charNegativePrompt,
+        linkedEpisodeId: sourceEpisodeId,
+      });
+      selectCharacter(targetId);
+      onCharacterCreated?.(targetId);
+
+      targetCharacter = {
+        id: targetId,
+        name: name.trim(),
+        description: description.trim(),
+        visualTraits: "",
+        gender: gender || undefined,
+        age: age || undefined,
+        personality: personality.trim() || undefined,
+        role: role.trim() || undefined,
+        traits: traits.trim() || undefined,
+        skills: skills.trim() || undefined,
+        keyActions: keyActions.trim() || undefined,
+        appearance: appearance.trim() || undefined,
+        relationships: relationships.trim() || undefined,
+        referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
+        styleId: styleId === "random" ? undefined : styleId,
+        folderId: currentFolderId,
+        projectId: activeProjectId || undefined,
+        views: [],
+        variations: [],
+        sheetCandidates: [],
+        tags: tags.length > 0 ? tags : undefined,
+        notes: notes.trim() || undefined,
+        identityAnchors,
+        negativePrompt: charNegativePrompt,
+        linkedEpisodeId: sourceEpisodeId,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      };
+    }
+
+    setGenerationStatus('generating');
+    setGeneratingCharacter(targetCharacter.id);
+
+    try {
+      const persisted = await generateForCharacter(targetCharacter, {
+        description: description.trim() || targetCharacter.description,
+        styleId,
+        referenceImages,
+        selectedElements,
+        promptLanguage,
+        identityAnchors,
+        negativePrompt: charNegativePrompt,
+        visualPromptEn,
+        visualPromptZh,
+        storyYear,
+        era,
+      });
+      setGenerationStatus('completed');
+      toast.success(
+        persisted.appliedAsPrimary
+          ? "首张设定图已自动保存并设为当前角色图"
+          : "新候选图已保存，可在右侧详情里选择是否覆盖当前设定图"
+      );
+    } catch (error) {
+      const err = error as Error;
+      setGenerationStatus('error', err.message);
+      toast.error(`生成失败: ${err.message}`);
+    } finally {
+      setGeneratingCharacter(null);
+    }
+  };
+
+  const handleBatchGenerate = async (scope: 'all' | 'supporting') => {
+    if (selectedElements.length === 0) {
+      toast.error("请至少选择一个生成内容");
+      return;
+    }
+
+    const targets = visibleCharacters.filter((character) => {
+      if (!character.description?.trim()) return false;
+      if (scope === 'all') return true;
+      const tags = character.tags || [];
+      return tags.includes('supporting') || tags.includes('minor') || tags.includes('extra');
+    });
+
+    if (targets.length === 0) {
+      toast.error(scope === 'all' ? "没有可生成的角色" : "没有可生成的配角");
+      return;
+    }
+
+    const toastId = `batch-character-${scope}`;
+    toast.loading(`正在批量生成${targets.length}个角色...`, { id: toastId });
+    setGenerationStatus('generating');
+
+    let successCount = 0;
+    const failed: string[] = [];
+
+    for (const character of targets) {
+      setGeneratingCharacter(character.id);
+      try {
+        await generateForCharacter(character, {
+          description: character.description,
+          styleId: character.styleId || styleId,
+          selectedElements,
+          promptLanguage,
+          identityAnchors: character.identityAnchors,
+          negativePrompt: character.negativePrompt,
+          storyYear,
+          era,
+        });
+        successCount += 1;
+        toast.loading(`正在批量生成 ${successCount}/${targets.length}: ${character.name}`, { id: toastId });
+      } catch (error) {
+        failed.push(`${character.name}: ${(error as Error).message}`);
+      }
+    }
+
+    setGeneratingCharacter(null);
+    setGenerationStatus(failed.length > 0 ? 'error' : 'completed', failed[0]);
+
+    if (failed.length > 0) {
+      toast.error(`批量生成完成，成功 ${successCount} 个，失败 ${failed.length} 个`, { id: toastId });
+      console.error('[CharacterBatchGenerate] Failed items:', failed);
+    } else {
+      toast.success(`批量生成完成，共 ${successCount} 个角色`, { id: toastId });
+    }
+  };
+
   // 创建新角色并生成图片（始终新建，不会覆盖已有角色）
   const handleCreateAndGenerate = async () => {
+    return handleCreateAndGenerateV2();
     if (!name.trim()) {
       toast.error("请输入角色名称");
       return;
@@ -404,8 +736,8 @@ export function GenerationPanel({ selectedCharacter, onCharacterCreated }: Gener
       
       // 如果有角色特定的负面提示词，追加到后面
       if (charNegativePrompt) {
-        const avoidList = charNegativePrompt.avoid || [];
-        const styleExclusions = charNegativePrompt.styleExclusions || [];
+        const avoidList = charNegativePrompt!.avoid || [];
+        const styleExclusions = charNegativePrompt!.styleExclusions || [];
         const charNegatives = [...avoidList, ...styleExclusions].join(', ');
         if (charNegatives) {
           negativePrompt = `${negativePrompt}, ${charNegatives}`;
@@ -434,6 +766,8 @@ export function GenerationPanel({ selectedCharacter, onCharacterCreated }: Gener
   };
 
   const handleSavePreview = async () => {
+    applyPreviewAsPrimary();
+    return;
     if (!previewUrl || !previewCharacterId) return;
 
     toast.loading("正在保存图片到本地...", { id: 'saving-preview' });
@@ -441,19 +775,19 @@ export function GenerationPanel({ selectedCharacter, onCharacterCreated }: Gener
     try {
       // Save image to local storage
       const localPath = await saveImageToLocal(
-        previewUrl, 
+        previewUrl!, 
         'characters', 
         `${name.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '_')}.png`
       );
 
       // Save view with local path
-      addCharacterView(previewCharacterId, {
+      addCharacterView(previewCharacterId!, {
         viewType: 'front',
         imageUrl: localPath,
       });
 
       const visualTraits = `${name} character, ${description.substring(0, 200)}`;
-      updateCharacter(previewCharacterId, { visualTraits });
+      updateCharacter(previewCharacterId!, { visualTraits });
 
       // 同步归档到素材库 AI图片 文件夹
       const aiFolderId = getOrCreateCategoryFolder('ai-image');
@@ -502,7 +836,7 @@ export function GenerationPanel({ selectedCharacter, onCharacterCreated }: Gener
           </div>
         </ScrollArea>
         <div className="p-3 border-t space-y-2 shrink-0">
-          <Button onClick={handleSavePreview} className="w-full">
+          <Button onClick={handleSavePreview} className="w-full" disabled={previewAppliedAsPrimary}>
             保存设定图
           </Button>
           <Button onClick={handleCreateAndGenerate} variant="outline" className="w-full" disabled={isGenerating}>
@@ -983,6 +1317,25 @@ export function GenerationPanel({ selectedCharacter, onCharacterCreated }: Gener
                 </>
               )}
             </Button>
+
+            <div className="grid grid-cols-2 gap-2">
+              <Button
+                variant="outline"
+                onClick={() => handleBatchGenerate('all')}
+                disabled={isGenerating || visibleCharacters.length === 0}
+                className="text-xs"
+              >
+                一键生成所有角色
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => handleBatchGenerate('supporting')}
+                disabled={isGenerating || batchSupportingCount === 0}
+                className="text-xs"
+              >
+                一键生成所有配角
+              </Button>
+            </div>
             
             {/* 复制角色数据按钮 */}
             <Button 

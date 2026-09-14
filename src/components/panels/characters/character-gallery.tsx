@@ -47,6 +47,8 @@ import {
   Grid2X2,
   List,
   Search,
+  CheckSquare,
+  Square,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
@@ -92,6 +94,9 @@ export function CharacterGallery({ onCharacterSelect, selectedCharacterId }: Cha
   const [renamingFolder, setRenamingFolder] = useState<CharacterFolder | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
+  const [isBulkMode, setIsBulkMode] = useState(false);
+  const [selectedCharacterIds, setSelectedCharacterIds] = useState<string[]>([]);
+  const [showBulkMoveDialog, setShowBulkMoveDialog] = useState(false);
 
   const visibleFolders = useMemo(() => {
     if (resourceSharing.shareCharacters) return folders;
@@ -133,6 +138,9 @@ export function CharacterGallery({ onCharacterSelect, selectedCharacterId }: Cha
     }
     return chars;
   }, [visibleCharacters, currentFolderId, searchQuery]);
+
+  const selectedCharacterSet = useMemo(() => new Set(selectedCharacterIds), [selectedCharacterIds]);
+  const bulkSelectedCount = selectedCharacterIds.length;
 
   // Breadcrumb path
   const breadcrumbPath = useMemo(() => {
@@ -196,6 +204,13 @@ export function CharacterGallery({ onCharacterSelect, selectedCharacterId }: Cha
   };
 
   const handleCharacterClick = (char: Character) => {
+    if (isBulkMode) {
+      setSelectedCharacterIds((prev) =>
+        prev.includes(char.id) ? prev.filter((id) => id !== char.id) : [...prev, char.id]
+      );
+      return;
+    }
+
     if (selectedCharacterId === char.id) {
       selectCharacter(null);
       onCharacterSelect(null);
@@ -203,6 +218,58 @@ export function CharacterGallery({ onCharacterSelect, selectedCharacterId }: Cha
       selectCharacter(char.id);
       onCharacterSelect(char);
     }
+  };
+
+  const handleToggleBulkMode = () => {
+    setIsBulkMode((prev) => {
+      const next = !prev;
+      if (next) {
+        selectCharacter(null);
+        onCharacterSelect(null);
+      } else {
+        setSelectedCharacterIds([]);
+      }
+      return next;
+    });
+  };
+
+  const handleSelectAllCurrent = () => {
+    setSelectedCharacterIds(currentCharacters.map((char) => char.id));
+  };
+
+  const handleClearBulkSelection = () => {
+    setSelectedCharacterIds([]);
+  };
+
+  const handleBulkDelete = () => {
+    if (selectedCharacterIds.length === 0) {
+      toast.error("请先选择角色");
+      return;
+    }
+    if (!confirm(`确定删除已选中的 ${selectedCharacterIds.length} 个角色吗？`)) return;
+
+    const selectedIdSet = new Set(selectedCharacterIds);
+    selectedCharacterIds.forEach((id) => deleteCharacter(id));
+    if (selectedCharacterId && selectedIdSet.has(selectedCharacterId)) {
+      selectCharacter(null);
+      onCharacterSelect(null);
+    }
+    setSelectedCharacterIds([]);
+    setIsBulkMode(false);
+    toast.success(`已删除 ${selectedIdSet.size} 个角色`);
+  };
+
+  const handleBulkMove = (folderId: string | null) => {
+    if (selectedCharacterIds.length === 0) {
+      toast.error("请先选择角色");
+      return;
+    }
+
+    selectedCharacterIds.forEach((id) => moveToFolder(id, folderId));
+    setShowBulkMoveDialog(false);
+    setSelectedCharacterIds([]);
+    setIsBulkMode(false);
+    toast.success(`已移动 ${selectedCharacterIds.length} 个角色`);
   };
 
   return (
@@ -294,7 +361,46 @@ export function CharacterGallery({ onCharacterSelect, selectedCharacterId }: Cha
               <List className="h-3.5 w-3.5" />
             </Button>
           </div>
+          <Button
+            variant={isBulkMode ? "default" : "outline"}
+            size="sm"
+            className="h-8"
+            onClick={handleToggleBulkMode}
+          >
+            {isBulkMode ? <CheckSquare className="h-3.5 w-3.5 mr-1" /> : <Square className="h-3.5 w-3.5 mr-1" />}
+            批量
+          </Button>
         </div>
+
+        {isBulkMode && (
+          <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 p-2">
+            <span className="text-xs text-muted-foreground">已选 {bulkSelectedCount} 项</span>
+            <Button variant="secondary" size="sm" className="h-7" onClick={handleSelectAllCurrent}>
+              全选当前
+            </Button>
+            <Button variant="ghost" size="sm" className="h-7" onClick={handleClearBulkSelection}>
+              清空
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7"
+              disabled={bulkSelectedCount === 0}
+              onClick={() => setShowBulkMoveDialog(true)}
+            >
+              移动到
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              className="h-7"
+              disabled={bulkSelectedCount === 0}
+              onClick={handleBulkDelete}
+            >
+              删除
+            </Button>
+          </div>
+        )}
       </div>
 
       {/* Content */}
@@ -367,13 +473,23 @@ export function CharacterGallery({ onCharacterSelect, selectedCharacterId }: Cha
                 >
                   <div
                     className={cn(
-                      "rounded-md border cursor-pointer transition-all",
+                      "relative rounded-md border cursor-pointer transition-all",
                       "hover:border-foreground/30",
+                      isBulkMode && selectedCharacterSet.has(char.id) && "border-primary ring-1 ring-primary bg-primary/5",
                       selectedCharacterId === char.id && "border-primary ring-1 ring-primary",
                       viewMode === "grid" ? "p-2" : "p-2 flex items-center gap-3"
                     )}
                     onClick={() => handleCharacterClick(char)}
                   >
+                    {isBulkMode && (
+                      <div className="absolute left-2 top-2 z-10 rounded-sm bg-background/90">
+                        {selectedCharacterSet.has(char.id) ? (
+                          <CheckSquare className="h-4 w-4 text-primary" />
+                        ) : (
+                          <Square className="h-4 w-4 text-muted-foreground" />
+                        )}
+                      </div>
+                    )}
                     {viewMode === "grid" ? (
                       <>
                         {/* Grid view */}
@@ -500,6 +616,29 @@ export function CharacterGallery({ onCharacterSelect, selectedCharacterId }: Cha
             </Button>
             <Button onClick={handleRenameFolder}>保存</Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showBulkMoveDialog} onOpenChange={setShowBulkMoveDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>批量移动角色</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Button variant="outline" className="w-full justify-start" onClick={() => handleBulkMove(null)}>
+              移动到当前根目录
+            </Button>
+            {visibleFolders.map((folder) => (
+              <Button
+                key={folder.id}
+                variant="outline"
+                className="w-full justify-start"
+                onClick={() => handleBulkMove(folder.id)}
+              >
+                {folder.name}
+              </Button>
+            ))}
+          </div>
         </DialogContent>
       </Dialog>
     </div>

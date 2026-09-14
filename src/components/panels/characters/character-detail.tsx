@@ -66,7 +66,7 @@ interface CharacterDetailProps {
 }
 
 export function CharacterDetail({ character }: CharacterDetailProps) {
-  const { updateCharacter, deleteCharacter, selectCharacter } = useCharacterLibraryStore();
+  const { updateCharacter, addCharacterView, deleteCharacter, selectCharacter } = useCharacterLibraryStore();
   
   const [isEditingName, setIsEditingName] = useState(false);
   const [editName, setEditName] = useState("");
@@ -168,6 +168,16 @@ export function CharacterDetail({ character }: CharacterDetailProps) {
 
   const currentView = character.views[selectedViewIndex];
   const variationCount = character.variations?.length || 0;
+  const currentPrimarySheet = character.views.find((view) => view.viewType === 'front')?.imageUrl || character.thumbnailUrl;
+
+  const handleUseSheetCandidate = (imageUrl: string) => {
+    updateCharacter(character.id, { thumbnailUrl: imageUrl });
+    addCharacterView(character.id, {
+      viewType: 'front',
+      imageUrl,
+    });
+    toast.success('已切换当前角色设定图');
+  };
 
   return (
     <div className="h-full flex flex-col">
@@ -277,6 +287,43 @@ export function CharacterDetail({ character }: CharacterDetailProps) {
                     />
                   </button>
                 ))}
+              </div>
+            )}
+
+            {(character.sheetCandidates || []).length > 0 && (
+              <div className="space-y-2">
+                <Label className="text-xs text-muted-foreground">设定图候选</Label>
+                <div className="grid grid-cols-3 gap-2">
+                  {(character.sheetCandidates || []).map((candidate) => {
+                    const isCurrent = currentPrimarySheet === candidate.imageUrl;
+                    return (
+                      <div key={candidate.id} className="space-y-1">
+                        <button
+                          className={cn(
+                            "w-full aspect-square rounded border overflow-hidden",
+                            isCurrent && "ring-2 ring-primary border-primary"
+                          )}
+                          onClick={() => setPreviewImageUrl(candidate.imageUrl)}
+                        >
+                          <LocalImage
+                            src={candidate.imageUrl}
+                            alt={`${character.name} candidate`}
+                            className="w-full h-full object-cover"
+                          />
+                        </button>
+                        <Button
+                          size="sm"
+                          variant={isCurrent ? "default" : "outline"}
+                          className="w-full h-7 text-[11px]"
+                          onClick={() => handleUseSheetCandidate(candidate.imageUrl)}
+                          disabled={isCurrent}
+                        >
+                          {isCurrent ? "当前使用中" : "设为当前"}
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             )}
           </div>

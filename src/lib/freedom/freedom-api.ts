@@ -14,7 +14,6 @@ import {
   getFeatureNotConfiguredMessage,
   type FeatureConfig,
 } from '@/lib/ai/feature-router';
-import { resolveImageApiFormat } from '@/lib/api-key-manager';
 import { uploadBase64Image } from '@/lib/utils/image-upload';
 import { isVeoModel, resolveVeoUploadCapability } from '@/lib/freedom/veo-capability';
 import { type AIFeature, useAPIConfigStore } from '@/stores/api-config-store';
@@ -207,8 +206,10 @@ function detectFreedomImageRoute(model: string, endpointTypes?: string[]): Freed
     return 'replicate';
   }
 
-  const baseRoute = resolveImageApiFormat(endpointTypes, model);
-  return baseRoute === 'openai_chat' ? 'openai_chat' : 'openai_images';
+  const baseRoute = model.toLowerCase().includes('gemini') &&
+    (model.toLowerCase().includes('image') || model.toLowerCase().includes('imagen'))
+    ? 'openai_chat' : 'openai_images';
+  return baseRoute;
 }
 
 type FreedomVideoRoute = 'openai_official' | 'unified' | 'volc' | 'wan' | 'kling' | 'replicate';

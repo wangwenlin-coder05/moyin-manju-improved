@@ -50,6 +50,7 @@ export function CharactersView() {
         <ResizablePanel defaultSize={25} minSize={20} maxSize={35}>
           <GenerationPanel 
             selectedCharacter={selectedCharacter}
+            visibleCharacters={visibleCharacters}
             onCharacterCreated={(id) => selectCharacter(id)}
           />
         </ResizablePanel>

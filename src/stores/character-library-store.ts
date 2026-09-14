@@ -57,6 +57,12 @@ export interface CharacterVariation {
   stageDescription?: string;       // 阶段描述："创业初期"、"事业巅峰"
 }
 
+export interface CharacterSheetCandidate {
+  id: string;
+  imageUrl: string;
+  createdAt: number;
+}
+
 export interface Character {
   id: string;
   name: string;
@@ -79,6 +85,7 @@ export interface Character {
   views: CharacterView[];
   // Wardrobe system - different outfits/states
   variations: CharacterVariation[];
+  sheetCandidates?: CharacterSheetCandidate[];
   thumbnailUrl?: string; // Main preview image (Base Look)
   // Enhanced fields (AniKuku inspired)
   tags?: string[];        // 角色标签 如 #武侠 #男主 #剑客
@@ -214,6 +221,7 @@ export const useCharacterLibraryStore = create<CharacterLibraryStore>()(
         const newCharacter: Character = {
           ...dataWithoutRef,
           variations: characterData.variations || [], // Initialize empty variations array
+          sheetCandidates: characterData.sheetCandidates || [],
           id,
           createdAt: now,
           updatedAt: now,
@@ -488,6 +496,11 @@ export const useCharacterLibraryStore = create<CharacterLibraryStore>()(
             ageDescription: v.ageDescription,
             stageDescription: v.stageDescription,
             // clothingReferenceImages: intentionally excluded (base64, recreated at runtime)
+          })),
+          sheetCandidates: (char.sheetCandidates || []).map((candidate: CharacterSheetCandidate) => ({
+            id: candidate.id,
+            imageUrl: candidate.imageUrl,
+            createdAt: candidate.createdAt,
           })),
         })),
       }),

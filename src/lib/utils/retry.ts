@@ -55,6 +55,27 @@ export function isRateLimitError(error: unknown): boolean {
 }
 
 /**
+ * Extract rate limit window from error message (in milliseconds).
+ * Parses patterns like:
+ *   "allows 2 requests per 1 minute(s)"
+ *   "allows 2 requests per 60 second(s)"
+ *   "rate limit exceeded: 3K tier allows 2 requests per 1 minute(s)"
+ */
+function extractRateLimitWindow(error: unknown): number | null {
+  const err = error as any;
+  const message = err?.message || '';
+  // Match "per X minute(s)" or "per X second(s)"
+  const match = message.match(/per\s+(\d+)\s+(minute|second)s?/i);
+  if (match) {
+    const value = parseInt(match[1], 10);
+    const unit = match[2].toLowerCase();
+    if (unit === 'minute') return value * 60 * 1000;
+    if (unit === 'second') return value * 1000;
+  }
+  return null;
+}
+
+/**
  * Retry an async operation with exponential backoff for rate limit errors
  * 
  * @param operation - The async operation to retry
@@ -85,7 +106,11 @@ export async function retryOperation<T>(
 
       // Check if we have more retries left
       if (attempt < maxRetries) {
-        const delay = baseDelay * Math.pow(2, attempt);
+        // 尝试从错误消息中提取限流窗口（如 "1 minute(s)"），使用整个窗口作为延迟
+        const rateLimitWindow = extractRateLimitWindow(error);
+        const delay = rateLimitWindow 
+          ? rateLimitWindow + 2000  // 窗口 + 2秒缓冲
+          : baseDelay * Math.pow(2, attempt);
 
         if (onRetry) {
           onRetry(attempt + 1, delay, lastError);

@@ -63,11 +63,12 @@ import { generateScenePrompts } from "@/lib/storyboard/scene-prompt-generator";
 import { useAPIConfigStore } from "@/stores/api-config-store";
 import { parseApiKeys } from "@/lib/api-key-manager";
 import { getFeatureConfig, getFeatureNotConfiguredMessage } from "@/lib/ai/feature-router";
-import { submitGridImageRequest } from "@/lib/ai/image-generator";
+import { imageUrlToBase64, submitGridImageRequest } from "@/lib/ai/image-generator";
 import { uploadToImageHost, isImageHostConfigured } from "@/lib/image-host";
 import { saveVideoToLocal, readImageAsBase64 } from '@/lib/image-storage';
 import { callVideoGenerationApi, extractLastFrameFromVideo, isContentModerationError } from './use-video-generation';
 import { persistSceneImage } from '@/lib/utils/image-persist';
+import { corsFetch } from "@/lib/cors-fetch";
 import {
   Select,
   SelectContent,
@@ -126,6 +127,44 @@ const isDiscouragedExternalImageUrl = (value?: string | null): boolean => {
 const shouldRefreshImageViaCurrentHost = (localUrl?: string | null): boolean => {
   return isLocalImageSource(localUrl) && useAPIConfigStore.getState().isImageHostConfigured();
 };
+
+async function normalizeImageForCanvas(imageUrl: string, logPrefix: string): Promise<string> {
+  if (!imageUrl) return imageUrl;
+  if (imageUrl.startsWith('data:image/')) return imageUrl;
+
+  if (imageUrl.startsWith('local-image://')) {
+    const base64 = await readImageAsBase64(imageUrl);
+    return base64 || imageUrl;
+  }
+
+  if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
+    try {
+      const normalized = await imageUrlToBase64(imageUrl);
+      if (normalized.startsWith('local-image://')) {
+        const base64 = await readImageAsBase64(normalized);
+        if (base64) return base64;
+      }
+      return normalized;
+    } catch (error) {
+      console.warn(`${logPrefix} imageUrlToBase64 failed, falling back to corsFetch`, error);
+    }
+
+    try {
+      const resp = await corsFetch(imageUrl);
+      const blob = await resp.blob();
+      return await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    } catch (error) {
+      console.warn(`${logPrefix} corsFetch fallback failed, using original URL`, error);
+    }
+  }
+
+  return imageUrl;
+}
 
 type ReferenceBucketKind = 'anchor' | 'character' | 'scene' | 'style';
 
@@ -1184,6 +1223,8 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
 
       console.log('[QuadGrid] Grid image URL:', gridImageUrl.substring(0, 80));
 
+      const normalizedQuadGridImageUrl = await normalizeImageForCanvas(gridImageUrl, '[QuadGrid]');
+
       // Slice 2x2 grid into 4 images
       const slicedImages = await new Promise<string[]>((resolve, reject) => {
         const img = new Image();
@@ -1206,7 +1247,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           resolve(results);
         };
         img.onerror = () => reject(new Error('加载四宫格图片失败'));
-        img.src = gridImageUrl!;
+        img.src = normalizedQuadGridImageUrl;
       });
 
       console.log('[QuadGrid] Sliced into', slicedImages.length, 'images');
@@ -2452,6 +2493,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
       const targetAspectW = targetAspect === '16:9' ? 16 : 9;
       const targetAspectH = targetAspect === '16:9' ? 9 : 16;
       const targetRatio = targetAspectW / targetAspectH;
+      const normalizedGridImageUrl = await normalizeImageForCanvas(gridImageUrl, '[MergedGen]');
       
       return new Promise((resolve, reject) => {
         const img = new Image();
@@ -2523,7 +2565,7 @@ export function SplitScenes({ onBack, onGenerateVideos }: SplitScenesProps) {
           resolve(results);
         };
         img.onerror = (e) => reject(new Error('加载九宫格图片失败'));
-        img.src = gridImageUrl;
+        img.src = normalizedGridImageUrl;
       });
     };
 

@@ -41,7 +41,14 @@ export async function corsFetch(
 
   // Electron 或非开发环境：直连
   if (isElectron() || !isViteDev()) {
-    return fetch(targetUrl, init);
+    try {
+      return await fetch(targetUrl, init);
+    } catch (directErr) {
+      // 直连失败（如 ERR_CONNECTION_CLOSED），回退到 /api/proxy-image 代理
+      console.warn('[corsFetch] 直连失败，回退到代理:', directErr);
+      const proxyUrl = `/api/proxy-image?url=${encodeURIComponent(targetUrl)}`;
+      return fetch(proxyUrl, { ...init, headers: undefined });
+    }
   }
 
   // 浏览器开发模式：走 Vite 代理

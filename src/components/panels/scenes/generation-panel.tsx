@@ -8,7 +8,7 @@
  * Scene creation controls: name, location, time, atmosphere, style, generate
  */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   useSceneStore,
   type Scene,
@@ -21,11 +21,12 @@ import type { PromptLanguage } from "@/types/script";
 import { useProjectStore } from "@/stores/project-store";
 import { useMediaStore } from "@/stores/media-store";
 import { getFeatureConfig, getFeatureNotConfiguredMessage } from "@/lib/ai/feature-router";
-import { generateSceneImage as generateSceneImageAPI, submitGridImageRequest } from "@/lib/ai/image-generator";
+import { generateSceneImage as generateSceneImageAPI, imageUrlToBase64, submitGridImageRequest } from "@/lib/ai/image-generator";
 import { generateContactSheetPrompt, generateMultiPageContactSheetData, type SceneViewpoint } from "@/lib/script/scene-viewpoint-generator";
 import type { PendingViewpointData, ContactSheetPromptSet } from "@/stores/media-panel-store";
 import { splitStoryboardImage } from "@/lib/storyboard/image-splitter";
 import { saveImageToLocal, readImageAsBase64 } from "@/lib/image-storage";
+import { corsFetch } from "@/lib/cors-fetch";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -72,6 +73,53 @@ import {
 interface GenerationPanelProps {
   selectedScene: Scene | null;
   onSceneCreated?: (id: string) => void;
+}
+
+async function normalizeImageForSplit(imageUrl: string, logPrefix: string): Promise<string> {
+  if (!imageUrl) return imageUrl;
+  if (imageUrl.startsWith("data:image/")) return imageUrl;
+  if (imageUrl.startsWith("local-image://")) {
+    const base64 = await readImageAsBase64(imageUrl);
+    return base64 || imageUrl;
+  }
+  if (imageUrl.startsWith("http://") || imageUrl.startsWith("https://")) {
+    console.log(`${logPrefix} HTTP URL 检测到，优先转换为本地/base64...`);
+    try {
+      const normalized = await imageUrlToBase64(imageUrl);
+      if (normalized.startsWith("local-image://")) {
+        const base64 = await readImageAsBase64(normalized);
+        if (base64) {
+          console.log(`${logPrefix} HTTP→local→base64 转换成功，长度:`, base64.length);
+          return base64;
+        }
+      }
+      if (normalized.startsWith("data:image/")) {
+        console.log(`${logPrefix} HTTP→base64 转换成功，长度:`, normalized.length);
+      } else {
+        console.log(`${logPrefix} HTTP URL 已转换为可复用本地路径:`, normalized);
+      }
+      return normalized;
+    } catch (error) {
+      console.warn(`${logPrefix} imageUrlToBase64 转换失败，回退到直接 fetch:`, error);
+    }
+
+    try {
+      const resp = await corsFetch(imageUrl);
+      const blob = await resp.blob();
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+      console.log(`${logPrefix} HTTP→base64 回退转换成功，长度:`, base64.length);
+      return base64;
+    } catch (convertErr) {
+      console.warn(`${logPrefix} HTTP→base64 回退转换失败，继续使用原URL:`, convertErr);
+    }
+  }
+
+  return imageUrl;
 }
 
 export function GenerationPanel({ selectedScene, onSceneCreated }: GenerationPanelProps) {
@@ -149,8 +197,11 @@ export function GenerationPanel({ selectedScene, onSceneCreated }: GenerationPan
     left: string | null;
     right: string | null;
   }>({ front: null, back: null, left: null, right: null });
-  
-  // 从剧本传递过来的多视角数据
+
+  // 防止重复调用自动联合图生成流水线
+  const isAutoGeneratingRef = useRef(false);
+
+  // 多页联合图状态 从剧本传递过来的多视角数据
   const [pendingViewpoints, setPendingViewpoints] = useState<PendingViewpointData[]>([]);
   const [pendingContactSheetPrompts, setPendingContactSheetPrompts] = useState<ContactSheetPromptSet[]>([]);
   const [currentPageIndex, setCurrentPageIndex] = useState(0);
@@ -1150,26 +1201,9 @@ ${gridItemsZh}
       
       const expectedCount = expectedRows * expectedCols;
       
-      // 如果图片是 HTTP URL，先转为 base64 避免 CORS 导致 canvas 被污染
-      let imageForSplit = contactSheetImage;
-      if (contactSheetImage.startsWith('http://') || contactSheetImage.startsWith('https://')) {
-        console.log('[Split] HTTP URL 检测到，转换为 base64...');
-        try {
-          const resp = await fetch(contactSheetImage);
-          const blob = await resp.blob();
-          imageForSplit = await new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result as string);
-            reader.onerror = reject;
-            reader.readAsDataURL(blob);
-          });
-          console.log('[Split] HTTP→base64 转换成功');
-        } catch (convertErr) {
-          console.warn('[Split] HTTP→base64 转换失败，使用原URL:', convertErr);
-        }
-      }
-      
-      const splitResults = await splitStoryboardImage(imageForSplit, {
+      // normalizeImageForSplit 内部已处理 HTTP→base64 转换（含代理回退），无需手动转换
+      const normalizedImageForSplit = await normalizeImageForSplit(contactSheetImage, '[Split]');
+      const splitResults = await splitStoryboardImage(normalizedImageForSplit, {
         aspectRatio: contactSheetAspectRatio,
         resolution: '2K',
         sceneCount: expectedCount,
@@ -1463,6 +1497,14 @@ ${gridItemsZh}
       return;
     }
 
+    // 防止重复调用：如果正在生成联合图，忽略本次点击
+    if (isAutoGeneratingRef.current) {
+      console.warn('[AutoContactSheet] 正在生成联合图，忽略重复调用');
+      toast.info('联合图正在生成中，请稍后...');
+      return;
+    }
+    isAutoGeneratingRef.current = true;
+
     // 快照当前所有必要的状态（确保后台运行时不受 UI 状态变化影响）
     const snapshotPrompt = contactSheetPrompt;
     const snapshotStyleId = styleId;
@@ -1633,28 +1675,9 @@ ${gridItemsZh}
         }
         const expectedCount = expectedRows * expectedCols;
 
-        // 如果图片是 HTTP URL，先转为 base64 避免 CORS 导致 canvas 被污染
-        let imageForSplit = generatedImageUrl;
-        if (generatedImageUrl.startsWith('http://') || generatedImageUrl.startsWith('https://')) {
-          console.log('[AutoContactSheet] HTTP URL 检测到，转换为 base64...');
-          try {
-            const resp = await fetch(generatedImageUrl);
-            const blob = await resp.blob();
-            imageForSplit = await new Promise<string>((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onloadend = () => resolve(reader.result as string);
-              reader.onerror = reject;
-              reader.readAsDataURL(blob);
-            });
-            console.log('[AutoContactSheet] HTTP→base64 转换成功，长度:', imageForSplit.length);
-          } catch (convertErr) {
-            console.warn('[AutoContactSheet] HTTP→base64 转换失败，使用原URL:', convertErr);
-          }
-        }
-
-        console.log('[AutoContactSheet] 切割参数:', { expectedRows, expectedCols, expectedCount, aspectRatio: snapshotAspectRatio });
-
-        const splitResults = await splitStoryboardImage(imageForSplit, {
+        // normalizeImageForSplit 内部已处理 HTTP→base64 转换（含代理回退），无需手动转换
+        const normalizedImageForSplit = await normalizeImageForSplit(generatedImageUrl, '[AutoContactSheet]');
+        const splitResults = await splitStoryboardImage(normalizedImageForSplit, {
           aspectRatio: snapshotAspectRatio,
           resolution: '2K',
           sceneCount: expectedCount,
@@ -1828,9 +1851,9 @@ ${gridItemsZh}
           });
         }
 
-        // 保存联合图到父场景（同时兼容 base64 和 imageForSplit 已转换过的）
-        let localContactSheet: string | null = imageForSplit || generatedImageUrl;
-        const imageToSave = imageForSplit || generatedImageUrl;
+        // 保存联合图到父场景
+        let localContactSheet: string | null = normalizedImageForSplit || generatedImageUrl;
+        const imageToSave = normalizedImageForSplit || generatedImageUrl;
         if (imageToSave && (imageToSave.startsWith('data:') || imageToSave.startsWith('http'))) {
           const csPath = await saveImageToLocal(
             imageToSave,
@@ -1892,6 +1915,9 @@ ${gridItemsZh}
         setTimeout(() => {
           setContactSheetTask(parentSceneId, null);
         }, 10000);
+      } finally {
+        // 重置生成锁，允许下次调用
+        isAutoGeneratingRef.current = false;
       }
     })();
   };
@@ -2010,7 +2036,8 @@ No characters, empty environment.`;
         });
 
         // 切割
-        const splitResults = await splitStoryboardImage(result.imageUrl, {
+        const normalizedOrthographicImage = await normalizeImageForSplit(result.imageUrl, '[OrthographicSplit]');
+        const splitResults = await splitStoryboardImage(normalizedOrthographicImage, {
           aspectRatio: orthographicAspectRatio,
           resolution: '2K',
           sceneCount: 4,

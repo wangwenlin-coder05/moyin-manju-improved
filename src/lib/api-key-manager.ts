@@ -107,8 +107,8 @@ export function classifyModelByName(modelName: string): ModelCapability[] {
   // ---- 推理/思考模型（仍归入 text）----
   if (/[- ](r1|thinking|reasoner|reason)/.test(name) || /^o[1-9]/.test(name)) return ['text', 'reasoning'];
 
-  // ---- 默认：对话模型 ----
-  return ['text'];
+  // ---- 默认：未知模型，返回空数组让上层 fallback 到平台级能力 ----
+  return [];
 }
 
 // ==================== Endpoint Routing ====================
@@ -164,9 +164,19 @@ export function resolveImageApiFormat(endpointTypes: string[] | undefined, model
     for (const t of endpointTypes) {
       if (IMAGE_ENDPOINT_MAP[t] === 'openai_images') return 'openai_images';
     }
-    // 其次尝试 chat completions （Gemini 多模态图片）
+    // 其次尝试 chat completions 端点
     for (const t of endpointTypes) {
-      if (IMAGE_ENDPOINT_MAP[t] === 'openai_chat') return 'openai_chat';
+      if (IMAGE_ENDPOINT_MAP[t] === 'openai_chat') {
+        // 'openai' 是模糊类型：只有 Gemini 图片模型明确需要 chat completions
+        // 其他（如 agnes-image-*、gpt-image-* 等）都走标准 images API
+        if (t === 'openai' && modelName) {
+          const name = modelName.toLowerCase();
+          if (name.includes('gemini') && (name.includes('image') || name.includes('imagen'))) {
+            return 'openai_chat';
+          }
+        }
+        return 'openai_images';
+      }
     }
     return 'unsupported';
   }
@@ -182,11 +192,7 @@ export function resolveImageApiFormat(endpointTypes: string[] | undefined, model
     if (name.includes('gemini') && (name.includes('image') || name.includes('imagen'))) {
       return 'openai_chat';
     }
-    // GPT image, flux, dall-e, ideogram, sd, recraft → standard images API
-    if (/gpt-image|flux|dall-e|dalle|ideogram|stable-diffusion|sdxl|sd3|recraft|kolors|cogview/.test(name)) {
-      return 'openai_images';
-    }
-    // sora_image → openai chat
+    // sora image → chat completions
     if (name.includes('sora') && name.includes('image')) {
       return 'openai_chat';
     }
